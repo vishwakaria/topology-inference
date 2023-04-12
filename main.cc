@@ -12,11 +12,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <thread>
-#include <pthread.h>
 #include "errorcheck.h"
 #include <atomic>
 #include <cassert>
-#include <pthread.h>
 #include <unordered_set>
 #include <unordered_map>
 #include <unistd.h>
@@ -254,8 +252,8 @@ void gather_results_to_rank_0(MPI_Comm comm, int num_nodes) {
   if (world_rank == 0)
     peer_read_lat.resize(num_nodes * num_nodes);
 
-  MPI_Gather(peer_read_lat.data(), sizeof(double) * num_nodes, MPI_DOUBLE, 
-    peer_read_lat.data(), sizeof(double) * num_nodes, MPI_DOUBLE, 0, comm);
+  MPI_Gather(peer_read_lat.data(), num_nodes, MPI_DOUBLE, 
+    peer_read_lat.data(), num_nodes, MPI_DOUBLE, 0, comm);
 }
 
 bool mpi_check() {
@@ -275,11 +273,17 @@ bool mpi_check() {
   return all_correct;
 }
 
+void crash_process(int time_in_seconds) {
+  sleep(time_in_seconds);
+  std::cout << "Process has run for " << time_in_seconds
+    << " seconds now. Crashing to prevent hang." << std::endl;
+  exit_and_close_files(2);
+}
 
 int main(int argc, char** argv) {
-  //--- Set a background thread to crash process in 30 seconds to prevent hang
-  // std::thread crash_thread(crash_process, 30);
-  // crash_thread.detach();
+  // --- Set a background thread to crash process in 30 seconds to prevent hang
+  std::thread crash_thread(crash_process, 30);
+  crash_thread.detach();
 
   //--- Init MPI
   setenv("FI_EFA_FORK_SAFE", "1", 1);
@@ -348,9 +352,7 @@ int main(int argc, char** argv) {
   if (local_rank == 0) {
     for (int j = 0; j < peer_read_lat.size(); j ++) {
         peer_read_lat[j] /= local_size;
-        std::cout << peer_read_lat[j] << "\t";
     }
-    std::cout << std::endl;
   }
   MPI_Barrier(MPI_COMM_WORLD);
 
@@ -372,8 +374,8 @@ int main(int argc, char** argv) {
   }
 
   MPI_Barrier(MPI_COMM_WORLD);
-  std::cout << world_rank << ": calling MPI finalize now " << std::endl;
 
+  std::cout << world_rank << ": calling MPI finalize now " << std::endl;
   MPI_Finalize();
   return 0;
 }
