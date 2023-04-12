@@ -31,25 +31,8 @@ const int num_gpu_per_efa = 2;
 const int num_iter = 1000;
 const int warmup_iter = 100;
 
-// GPU 0 and 1 share EFA 0
-// GPU 2 and 3 share EFA 1
-// GPU 4 and 5 share EFA 2
-// GPU 6 and 7 share EFA 3
-// Each EFA has 2 queue pairs, one for each GPU
-
-// GPU 0's of each machine communicate among themselves
-// GPU 1's of each machine communicate among themselves, etc.
-// Each GPU will enqueue 1 send/recv/read for each communication peer
-
-// Exit code 0 --> node is good
-// Exit code 1 --> node is faulty due to EFA related issues
-// Exit code 2 --> unknown issue caused a hang and the entire process timed out
-// Exit code 3 --> other errors, such as MPI failed
-
-// Every node will generate a log file with name 'efa_checker_rank_<world_rank>.log'
-// However, only node 0's log file will contain debug information about faulty EFA connections
-// Additionally, node 0 will also output 'efa_checker.result' which contains which nodes we suggest
-// to remove from the cluster such that the remaining nodes have full mesh connectivity among them
+// TODO: Generate log files on each node
+// TODO: Add doc strings
 
 std::string output_dir;
 // std::ofstream log, result;
@@ -234,7 +217,7 @@ public:
         offset = peer_idx * packet_size;
         // std::cout << world_rank << ": posting read request for peer_idx " << peer_idx << 
         //   " gpu_idx " << gpu_idx << " at offset " << offset << std::endl;
-        // pair.read_status.enqueued = post_read_request_to_efa(peer_idx, gpu_idx, offset);
+        pair.read_status.enqueued = post_read_request_to_efa(peer_idx, gpu_idx, offset);
         auto end = poll_peer_read_completion(gpu_idx);
         double timeMicroSeconds = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count();
         if (iter > warmup_iter) {
@@ -343,11 +326,11 @@ int main(int argc, char** argv) {
   std::cout << world_rank << ": All EFA devices have been loaded. Creating address handles now..." << std::endl;
   driver.init_records();
   driver.create_address_handles();
-  MPI_Barrier(MPI_COMM_WORLD);
   std::cout << world_rank << ": Done Creating address handles" << std::endl;
+  MPI_Barrier(MPI_COMM_WORLD);
 
   //--- Compute read latencies
-  std::cout << world_rank << ":Executing read from peers now." << std::endl;
+  std::cout << world_rank << ": Executing read from peers now." << std::endl;
   int num_nodes = world_size / local_size;
   driver.all_gather_read_from_bufs();
   driver.compute_peer_read_lat(num_nodes);

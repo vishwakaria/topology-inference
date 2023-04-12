@@ -38,6 +38,7 @@ void RdmaResources::init(int efa_idx, int num_qp, size_t send_buff_size, size_t 
     addr.qpn[qp_idx] = ctx_.queuePair[qp_idx]->qp_num;
   }
   addr.qkey = ctx_.MAGIC_QKEY;
+  // std::cout << "done before mem reg" << std::endl;
 
   // each EFA is used by two gpus, register memory for all buffers
   for (int i = 0; i < 2; i++) {
