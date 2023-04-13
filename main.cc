@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <stdio.h>
 #include <mpi.h>
 #include <cuda.h>
@@ -27,15 +28,17 @@ const int num_efa = 4; // p4d
 const int num_gpu = 8;
 const int num_gpu_per_efa = 2;
 const int num_iter = 1000;
-const int warmup_iter = 100;
-
+const int warmup_iter = 200;
+const int efa_idx = 0;
+const int gpu_idx = 0;
+const int qp_idx = 0;
 // TODO: Generate log files on each node
 // TODO: Add doc strings
 
 std::string output_dir;
 // std::ofstream log, result;
 
-int world_rank, world_size, local_rank, local_size;
+int world_rank, world_size, local_rank, local_size, num_nodes;
 
 void exit_and_close_files(int ret) {
   // log.close();
@@ -57,6 +60,10 @@ struct GPUPair {
   bool ah_created;
 };
 
+int getWorldRank() {
+  return atoi(std::getenv("OMPI_COMM_WORLD_RANK"));
+}
+
 std::vector<GPUPair> gpu_pairs;
 std::vector<double> peer_read_lat;
 
@@ -72,14 +79,12 @@ public:
     int read_into_buf_size = world_size * packet_size;
 
     std::string bootstrap_error;
-    for (int efa_idx = 0; efa_idx < num_efa; efa_idx ++) {
-      try {
-        rdmaResources[efa_idx].init(efa_idx, num_gpu_per_efa, send_buf_size, recv_buf_size, read_from_buf_size, read_into_buf_size);
-      } catch (EFAException& e) {
-        bootstrap_error += "Node " + std::to_string(world_rank) + " EFA " + std::to_string(efa_idx)
-	    + " failed to bootstrap with false assertion: " + e.what() + "\n";
-        throw std::runtime_error(bootstrap_error);
-      }
+    try {
+      rdmaResources.init(efa_idx, num_gpu_per_efa, send_buf_size, recv_buf_size, read_from_buf_size, read_into_buf_size);
+    } catch (EFAException& e) {
+      bootstrap_error += "Node " + std::to_string(world_rank) + " EFA " + std::to_string(efa_idx)
+    + " failed to bootstrap with false assertion: " + e.what() + "\n";
+      throw std::runtime_error(bootstrap_error);
     }
     return 0;
   }
@@ -101,31 +106,25 @@ public:
   }
 
   void create_address_handles() {
-    RdmaResources::FederatedAddress federatedAddress;
-    for (int efa_idx = 0; efa_idx < num_efa; efa_idx++) {
-      federatedAddress.efaAddress[efa_idx] = rdmaResources[efa_idx].addr;
-    }
-
-    federatedAddresses.resize(world_size);
+    RdmaResources::Address address = rdmaResources.addr;
+    addresses.resize(world_size);
     MPI_Allgather(
-      &federatedAddress, sizeof(federatedAddress), MPI_BYTE,
-      federatedAddresses.data(), sizeof(federatedAddress), MPI_BYTE, MPI_COMM_WORLD);
+      &address, sizeof(address), MPI_BYTE,
+      addresses.data(), sizeof(address), MPI_BYTE, MPI_COMM_WORLD);
 
     for (int peer_idx = 0; peer_idx < world_size; peer_idx ++) {
       if (peer_idx == world_rank) continue;
-      for (int efa_idx = 0; efa_idx < num_efa; efa_idx ++) {
-        ibv_ah_attr ahAttr;
-        memset(&ahAttr, 0, sizeof(ahAttr));
-        ahAttr.is_global = 1;
-        ahAttr.port_num = 1;
-        ahAttr.grh.dgid = federatedAddresses[peer_idx].efaAddress[efa_idx].gid;
-        federatedAddresses[peer_idx].efaAddress[efa_idx].ah = ibv_create_ah(
-          rdmaResources[efa_idx].ctx_.protectionDomain, &ahAttr);
-        gpu_pairs[(efa_idx * num_gpu_per_efa) * world_size + peer_idx].ah_created =
-          federatedAddresses[peer_idx].efaAddress[efa_idx].ah != nullptr;
-        gpu_pairs[(efa_idx * num_gpu_per_efa + 1) * world_size + peer_idx].ah_created =
-          federatedAddresses[peer_idx].efaAddress[efa_idx].ah != nullptr;
-      }
+      ibv_ah_attr ahAttr;
+      memset(&ahAttr, 0, sizeof(ahAttr));
+      ahAttr.is_global = 1;
+      ahAttr.port_num = 1;
+      ahAttr.grh.dgid = addresses[peer_idx].gid;
+      addresses[peer_idx].ah = ibv_create_ah(
+        rdmaResources.ctx_.protectionDomain, &ahAttr);
+      gpu_pairs[(efa_idx * num_gpu_per_efa) * world_size + peer_idx].ah_created =
+        addresses[peer_idx].ah != nullptr;
+      gpu_pairs[(efa_idx * num_gpu_per_efa + 1) * world_size + peer_idx].ah_created =
+        addresses[peer_idx].ah != nullptr;
     }
   }
 
@@ -136,51 +135,43 @@ public:
 
   std::vector<RDMAReadInfo> rdma_read_info;
   void all_gather_read_from_bufs() {
-    rdma_read_info.resize(world_size * num_gpu);
-    for (int gpu_idx = 0; gpu_idx < num_gpu; gpu_idx ++) {
-      int efa_idx = gpu_idx / num_gpu_per_efa;
-      int qp_idx = gpu_idx % num_gpu_per_efa;
-      rdma_read_info[gpu_idx].base_addr = rdmaResources[efa_idx].read_from_buf[qp_idx];
-      rdma_read_info[gpu_idx].rkey = rdmaResources[efa_idx].mr_read_from[qp_idx]->rkey;
-    }
+    rdma_read_info.resize(world_size);
+    rdma_read_info[gpu_idx].base_addr = rdmaResources.read_from_buf[qp_idx];
+    rdma_read_info[gpu_idx].rkey = rdmaResources.mr_read_from[qp_idx]->rkey;
     MPI_Allgather(
         rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE,
         rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE, MPI_COMM_WORLD);
   }
 
-  bool post_read_request_to_efa(int peer_idx, int gpu_idx, size_t offset) {
-    int efa_idx = gpu_idx / num_gpu_per_efa;
-    int qp_idx = gpu_idx % num_gpu_per_efa;
-    ibv_qp_ex *qpEx = rdmaResources[efa_idx].ctx_.queuePairEx[qp_idx];
+  bool post_read_request_to_efa(int peer_idx, size_t offset) {
+    ibv_qp_ex *qpEx = rdmaResources.ctx_.queuePairEx[qp_idx];
     ibv_wr_start(qpEx);
     ibv_sge list;
-    list.addr = (uint64_t)rdmaResources[efa_idx].read_into_buf[qp_idx] + offset;
+    list.addr = (uint64_t)rdmaResources.read_into_buf[qp_idx] + offset;
     list.length = packet_size;
-    list.lkey = rdmaResources[efa_idx].mr_read_into[qp_idx]->lkey;
+    list.lkey = rdmaResources.mr_read_into[qp_idx]->lkey;
     qpEx->wr_id = (uint64_t)peer_idx;
     ibv_wr_rdma_read(qpEx, rdma_read_info[peer_idx * num_gpu + gpu_idx].rkey,
       (uint64_t)rdma_read_info[peer_idx * num_gpu + gpu_idx].base_addr + offset);
     ibv_wr_set_sge_list(qpEx, 1, &list);
-    ibv_wr_set_ud_addr(qpEx, federatedAddresses[peer_idx].efaAddress[efa_idx].ah,
-      federatedAddresses[peer_idx].efaAddress[efa_idx].qpn[qp_idx],
-      federatedAddresses[peer_idx].efaAddress[efa_idx].qkey);
+    ibv_wr_set_ud_addr(qpEx, addresses[peer_idx].ah,
+      addresses[peer_idx].qpn[qp_idx],
+      addresses[peer_idx].qkey);
     int ret = ibv_wr_complete(qpEx);
     return ret == 0;
   }
 
   int read_count = 0;
-  std::chrono::steady_clock::time_point poll_peer_read_completion(int gpu_idx) {
+  std::chrono::steady_clock::time_point poll_peer_read_completion() {
     int read_from;
-    int efa_idx = gpu_idx / num_gpu_per_efa;
-    int qp_idx = gpu_idx % num_gpu_per_efa;
     bool more_to_poll = true;
     while (more_to_poll) {
       more_to_poll = false;
-      int num_entries = ibv_poll_cq(rdmaResources[efa_idx].ctx_.sendCQ[qp_idx],
+      int num_entries = ibv_poll_cq(rdmaResources.ctx_.sendCQ[qp_idx],
             completion_burst_size_, send_work_completions_.data());
       assert(num_entries >= 0 && "ibv_poll_cq returned negative value");
       read_count += num_entries;
-      if (num_entries == 0) {
+      if (num_entries == 1) {
         return std::chrono::steady_clock::now();
       }
       for (int i = 0; i < num_entries; i ++) {
@@ -193,10 +184,10 @@ public:
     }
   }
 
-  void compute_peer_read_lat(int num_nodes) {
+  void compute_peer_read_lat() {
     size_t offset;
     int node_id = world_rank / local_size;
-    int peer_idx, gpu_idx = local_rank;
+    int peer_idx;
     double total_read_lat, avg_read_lat;
     peer_read_lat.resize(num_nodes);
     for (int peer_node_idx = 0; peer_node_idx < num_nodes; peer_node_idx ++) {
@@ -206,19 +197,15 @@ public:
         continue;
       }
       peer_idx = peer_node_idx * local_size + gpu_idx;
-      // std::cout << world_rank << ": peer_idx = " << peer_idx << 
-      //   " for peer_node_idx = " << peer_node_idx << std::endl;
       for (int iter = 0; iter < num_iter; iter ++) {
         auto begin = std::chrono::steady_clock::now();
         auto& pair = gpu_pairs[world_size * gpu_idx + peer_idx];
         if (!pair.ah_created) continue;
         offset = peer_idx * packet_size;
-        // std::cout << world_rank << ": posting read request for peer_idx " << peer_idx << 
-        //   " gpu_idx " << gpu_idx << " at offset " << offset << std::endl;
-        pair.read_status.enqueued = post_read_request_to_efa(peer_idx, gpu_idx, offset);
-        auto end = poll_peer_read_completion(gpu_idx);
-        double timeMicroSeconds = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count();
-        if (iter > warmup_iter) {
+        pair.read_status.enqueued = post_read_request_to_efa(peer_idx, offset);
+        auto end = poll_peer_read_completion();
+        double timeMicroSeconds = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+        if (iter >= warmup_iter) {
           total_read_lat += timeMicroSeconds;
         }
       }
@@ -227,8 +214,8 @@ public:
     }
   }
 
-  RdmaResources rdmaResources[num_efa];
-  std::vector<RdmaResources::FederatedAddress> federatedAddresses;
+  RdmaResources rdmaResources;
+  std::vector<RdmaResources::Address> addresses;
   const int completion_burst_size_ = 1024;
   std::vector<ibv_wc> send_work_completions_{completion_burst_size_};
   std::vector<ibv_wc> recv_work_completions_{completion_burst_size_};
@@ -240,37 +227,20 @@ void gather_instance_id_to_rank_0() {
   instance_id += "\0                             "; // 30 spaces padding to avoid illegal mem access
   char instance_ids[world_size][30];
   MPI_Gather(instance_id.c_str(), 30, MPI_BYTE, instance_ids, 30, MPI_BYTE, 0, MPI_COMM_WORLD);
-  // if (world_rank == 0) {
-  //   std::cout << "Instance id mapping: " << std::endl;
-  //   for (int i = 0; i < world_size; i++) {
-  //     std::cout << "Node " << i << " - " << instance_ids[i] << std::endl;
-  //   }
-  // }
+  if (world_rank == 0) {
+    std::cout << "Instance id mapping: " << std::endl;
+    for (int i = 0; i < world_size; i++) {
+      std::cout << "Node " << i << " - " << instance_ids[i] << std::endl;
+    }
+  }
 }
 
-void gather_results_to_rank_0(MPI_Comm comm, int num_nodes) {
+void gather_results_to_rank_0(MPI_Comm comm) {
   if (world_rank == 0)
     peer_read_lat.resize(num_nodes * num_nodes);
 
   MPI_Gather(peer_read_lat.data(), num_nodes, MPI_DOUBLE, 
     peer_read_lat.data(), num_nodes, MPI_DOUBLE, 0, comm);
-}
-
-bool mpi_check() {
-  MPI_Barrier(MPI_COMM_WORLD);
-  const int TEST_VEC_SIZE = 128;
-  std::vector<char> vec(TEST_VEC_SIZE * world_size, 0);
-  memset(vec.data(), 1, TEST_VEC_SIZE);
-  MPI_Allgather(
-    vec.data(), TEST_VEC_SIZE, MPI_BYTE,
-    vec.data(), TEST_VEC_SIZE, MPI_BYTE, MPI_COMM_WORLD);
-  bool all_correct = true;
-  for (int peer_idx = 0; peer_idx < world_size; peer_idx ++) {
-    for (int i = 0; i < TEST_VEC_SIZE; i ++) {
-      all_correct = all_correct && (vec[peer_idx * TEST_VEC_SIZE + i] == 1);
-    }
-  }
-  return all_correct;
 }
 
 void crash_process(int time_in_seconds) {
@@ -305,16 +275,6 @@ int main(int argc, char** argv) {
     output_dir = argv[1];
     output_dir += "/";
   }
-  
-  //--- Test MPI communication
-  std::cout << "----------\n" <<
-    "Running simple MPI correctness check..." << std::endl;
-  if (!mpi_check()) {
-    std::cout << "Failed, aborting..." << std::endl;
-    exit_and_close_files(3);
-  }
-  MPI_Barrier(MPI_COMM_WORLD);
-  std::cout << "Done" << std::endl;
 
   //--- Construct instance id mapping on node 0
   gather_instance_id_to_rank_0();
@@ -335,36 +295,19 @@ int main(int argc, char** argv) {
 
   //--- Compute read latencies
   std::cout << world_rank << ": Executing read from peers now." << std::endl;
-  int num_nodes = world_size / local_size;
+  num_nodes = world_size / local_size;
   driver.all_gather_read_from_bufs();
-  driver.compute_peer_read_lat(num_nodes);
-  MPI_Barrier(MPI_COMM_WORLD);
-
-  //--- Reduce results locally
-  MPI_Comm local_comm;
-  MPI_Comm_split(MPI_COMM_WORLD, world_rank / local_size, world_rank, &local_comm);
-  if (local_rank == 0) {
-    MPI_Reduce(MPI_IN_PLACE, peer_read_lat.data(), num_nodes, MPI_DOUBLE, MPI_SUM, 0, local_comm);
-  } else {
-    MPI_Reduce(peer_read_lat.data(), peer_read_lat.data(), num_nodes, MPI_DOUBLE, MPI_SUM, 0, local_comm);
-  }
-
-  if (local_rank == 0) {
-    for (int j = 0; j < peer_read_lat.size(); j ++) {
-        peer_read_lat[j] /= local_size;
-    }
-  }
+  driver.compute_peer_read_lat();
   MPI_Barrier(MPI_COMM_WORLD);
 
   //--- Gather results across all nodes on rank 0
-  MPI_Comm peer_comm;
-  MPI_Comm_split(MPI_COMM_WORLD, local_rank, world_rank, &peer_comm);  
-  gather_results_to_rank_0(peer_comm, num_nodes);
+  gather_results_to_rank_0(MPI_COMM_WORLD);
   MPI_Barrier(MPI_COMM_WORLD);
 
   if (world_rank == 0) {
     std::cout << "-----------------------------------" << std::endl;
-    std::cout << "Latency measurements across nodes: " << std::endl;
+    std::cout << "Latency measurements across nodes (microseconds): " << std::endl;
+    std::cout << std::setprecision(2) << std::fixed;
     for (int i = 0; i < num_nodes; i ++) {
       for (int j = 0; j < num_nodes; j ++) {
         std::cout << peer_read_lat[num_nodes * i + j] << "\t";

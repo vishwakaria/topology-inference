@@ -19,10 +19,6 @@ public:
     struct ibv_ah *ah;
   };
 
-  struct FederatedAddress {
-    struct Address efaAddress[4];
-  };
-
   RdmaResources() = default;
   ~RdmaResources();
 
