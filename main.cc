@@ -1,4 +1,5 @@
 #include <iostream>
+#include <algorithm>
 #include <iomanip>
 #include <stdio.h>
 #include <mpi.h>
@@ -16,6 +17,7 @@
 #include "errorcheck.h"
 #include <atomic>
 #include <cassert>
+#include <numeric>
 #include <unordered_set>
 #include <unordered_map>
 #include <unistd.h>
@@ -23,12 +25,12 @@
 #include "rdma_resources.h"
 #include "instance_id.h"
 
-const size_t packet_size = 4*1024*1024;
+const size_t packet_size = 8*1024;
 const int num_efa = 4; // p4d
 const int num_gpu = 8;
 const int num_gpu_per_efa = 2;
-const int num_iter = 1000;
-const int warmup_iter = 200;
+const int num_iter = 10000;
+const int warmup_iter = 100;
 const int efa_idx = 0;
 const int gpu_idx = 0;
 const int qp_idx = 0;
@@ -65,7 +67,7 @@ int getWorldRank() {
 }
 
 std::vector<GPUPair> gpu_pairs;
-std::vector<double> peer_read_lat;
+std::vector<double> peer_read_latency;
 
 class FederatedRdmaClient {
 public:
@@ -188,12 +190,12 @@ public:
     size_t offset;
     int node_id = world_rank / local_size;
     int peer_idx;
-    double total_read_lat, avg_read_lat;
-    peer_read_lat.resize(num_nodes);
+    std::vector<double> all_read_latencies;
+    double avg_read_latency;
+    peer_read_latency.resize(num_nodes);
     for (int peer_node_idx = 0; peer_node_idx < num_nodes; peer_node_idx ++) {
-      total_read_lat = 0;
       if (peer_node_idx == node_id) {
-        peer_read_lat[peer_node_idx] = 0;
+        peer_read_latency[peer_node_idx] = 0;
         continue;
       }
       peer_idx = peer_node_idx * local_size + gpu_idx;
@@ -206,12 +208,25 @@ public:
         auto end = poll_peer_read_completion();
         double timeMicroSeconds = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
         if (iter >= warmup_iter) {
-          total_read_lat += timeMicroSeconds;
+          all_read_latencies.push_back(timeMicroSeconds);
         }
       }
-      avg_read_lat = total_read_lat/(num_iter - warmup_iter);
-      peer_read_lat[peer_node_idx] = avg_read_lat;
+      avg_read_latency = avg_without_outliers(all_read_latencies);
+      peer_read_latency[peer_node_idx] = avg_read_latency;
+      all_read_latencies.clear();
     }
+  }
+
+  double avg_without_outliers(std::vector<double>& latencies) {
+    std::sort(latencies.begin(), latencies.end());
+    int p90_size = latencies.size() * 0.9;
+    // std::cout << "averaging " << p90_size << " elements" << std::endl;
+    // if (world_rank == 0) {
+    //   for (int i = 0; i < p90_size; i++) {
+    //     std::cout << i << ": " << latencies[i] << std::endl;
+    //   }
+    // }
+    return std::reduce(latencies.begin(), latencies.begin() + p90_size, 0.0) / p90_size;
   }
 
   RdmaResources rdmaResources;
@@ -237,10 +252,10 @@ void gather_instance_id_to_rank_0() {
 
 void gather_results_to_rank_0(MPI_Comm comm) {
   if (world_rank == 0)
-    peer_read_lat.resize(num_nodes * num_nodes);
+    peer_read_latency.resize(num_nodes * num_nodes);
 
-  MPI_Gather(peer_read_lat.data(), num_nodes, MPI_DOUBLE, 
-    peer_read_lat.data(), num_nodes, MPI_DOUBLE, 0, comm);
+  MPI_Gather(peer_read_latency.data(), num_nodes, MPI_DOUBLE, 
+    peer_read_latency.data(), num_nodes, MPI_DOUBLE, 0, comm);
 }
 
 void crash_process(int time_in_seconds) {
@@ -310,7 +325,7 @@ int main(int argc, char** argv) {
     std::cout << std::setprecision(2) << std::fixed;
     for (int i = 0; i < num_nodes; i ++) {
       for (int j = 0; j < num_nodes; j ++) {
-        std::cout << peer_read_lat[num_nodes * i + j] << "\t";
+        std::cout << peer_read_latency[num_nodes * i + j] << "\t";
       }
       std::cout << std::endl;
     } 

@@ -20,6 +20,8 @@
 
 #include <chrono>
 
+int gpu_idx = 0;
+
 void RdmaResources::init(int efa_idx, int num_qp, size_t send_buff_size, size_t recv_buff_size,
   int read_from_buff_size, int read_into_buff_size) {
   send_buff_size_ = send_buff_size;
@@ -38,19 +40,18 @@ void RdmaResources::init(int efa_idx, int num_qp, size_t send_buff_size, size_t 
     addr.qpn[qp_idx] = ctx_.queuePair[qp_idx]->qp_num;
   }
   addr.qkey = ctx_.MAGIC_QKEY;
-  // std::cout << "done before mem reg" << std::endl;
 
   // each EFA is used by two gpus, register memory for all buffers
   for (int i = 0; i < 2; i++) {
     int flags = IBV_ACCESS_LOCAL_WRITE;
     int flags_with_read = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ;
     CUDACHECK(cudaSetDevice(efa_idx * 2 + i));
-    CUDACHECK(cudaMalloc(&send_buf[i], send_buff_size));
-    CUDACHECK(cudaMalloc(&recv_buf[i], recv_buff_size));
+    CUDACHECK(cudaMallocHost(&send_buf[i], send_buff_size));
+    CUDACHECK(cudaMallocHost(&recv_buf[i], recv_buff_size));
     mr_send[i] = ibv_reg_mr(ctx_.protectionDomain, send_buf[i], send_buff_size, flags);
     mr_recv[i] = ibv_reg_mr(ctx_.protectionDomain, recv_buf[i], recv_buff_size, flags);
-    CUDACHECK(cudaMalloc(&read_from_buf[i], read_from_buff_size));
-    CUDACHECK(cudaMalloc(&read_into_buf[i], read_into_buff_size));
+    CUDACHECK(cudaMallocHost(&read_from_buf[i], read_from_buff_size));
+    CUDACHECK(cudaMallocHost(&read_into_buf[i], read_into_buff_size));
     mr_read_from[i] = ibv_reg_mr(ctx_.protectionDomain, read_from_buf[i], read_from_buff_size, flags_with_read);
     mr_read_into[i] = ibv_reg_mr(ctx_.protectionDomain, read_into_buf[i], read_into_buff_size, flags_with_read);
     error_msg = "Unable to create memory registration";
