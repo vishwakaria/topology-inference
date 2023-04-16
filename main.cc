@@ -26,7 +26,6 @@
 #include "instance_id.h"
 
 const size_t packet_size = 8*1024;
-const int num_efa = 4; // p4d
 const int num_gpu = 8;
 const int num_gpu_per_efa = 2;
 const int num_iter = 10000;
@@ -92,19 +91,19 @@ public:
   }
 
   void init_records() {
-    gpu_pairs.resize(num_gpu * world_size);
+    gpu_pairs.resize(world_size);
     for (auto& pair : gpu_pairs) {
       pair.ah_created = false;
       pair.read_status.enqueued = false;
       pair.read_status.completed = false;
     }
-    for (int gpu_id = 0; gpu_id < num_gpu; gpu_id ++) {
-      auto& pair = gpu_pairs[gpu_id * world_size + world_rank];
+    // for (int gpu_id = 0; gpu_id < num_gpu; gpu_id ++) {
+      auto& pair = gpu_pairs[gpu_idx * world_size + world_rank];
       pair.ah_created = true;
       pair.read_status.enqueued = true;
       pair.read_status.completed = true;
       pair.read_status.status = IBV_WC_SUCCESS;
-    }
+    // }
   }
 
   void create_address_handles() {
@@ -141,8 +140,8 @@ public:
     rdma_read_info[gpu_idx].base_addr = rdmaResources.read_from_buf[qp_idx];
     rdma_read_info[gpu_idx].rkey = rdmaResources.mr_read_from[qp_idx]->rkey;
     MPI_Allgather(
-        rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE,
-        rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE, MPI_COMM_WORLD);
+        rdma_read_info.data(), sizeof(RDMAReadInfo), MPI_BYTE,
+        rdma_read_info.data(), sizeof(RDMAReadInfo), MPI_BYTE, MPI_COMM_WORLD);
   }
 
   bool post_read_request_to_efa(int peer_idx, size_t offset) {
@@ -220,12 +219,6 @@ public:
   double avg_without_outliers(std::vector<double>& latencies) {
     std::sort(latencies.begin(), latencies.end());
     int p90_size = latencies.size() * 0.9;
-    // std::cout << "averaging " << p90_size << " elements" << std::endl;
-    // if (world_rank == 0) {
-    //   for (int i = 0; i < p90_size; i++) {
-    //     std::cout << i << ": " << latencies[i] << std::endl;
-    //   }
-    // }
     return std::reduce(latencies.begin(), latencies.begin() + p90_size, 0.0) / p90_size;
   }
 
@@ -265,9 +258,24 @@ void crash_process(int time_in_seconds) {
   exit_and_close_files(2);
 }
 
+void print_results() {
+  std::cout << std::setprecision(2) << std::fixed;
+  for (int i = 0; i < num_nodes; i++) {
+    std::cout << " \t" << i;
+  }
+  std::cout << std::endl;
+  for (int i = 0; i < num_nodes; i ++) {
+    std::cout << i << "\t";
+    for (int j = 0; j < num_nodes; j ++) {
+      std::cout << peer_read_latency[num_nodes * i + j] << "\t";
+    }
+    std::cout << std::endl;
+  } 
+}
+
 int main(int argc, char** argv) {
   // --- Set a background thread to crash process in 30 seconds to prevent hang
-  std::thread crash_thread(crash_process, 30);
+  std::thread crash_thread(crash_process, 12);
   crash_thread.detach();
 
   //--- Init MPI
@@ -299,41 +307,32 @@ int main(int argc, char** argv) {
   FederatedRdmaClient driver;
   driver.allocateResources();
   MPI_Barrier(MPI_COMM_WORLD);
-  std::cout << world_rank << ":Done Loading EFA devices..." << std::endl;
 
   //--- Creating remote address handles
   std::cout << world_rank << ": All EFA devices have been loaded. Creating address handles now..." << std::endl;
   driver.init_records();
   driver.create_address_handles();
-  std::cout << world_rank << ": Done Creating address handles" << std::endl;
   MPI_Barrier(MPI_COMM_WORLD);
 
   //--- Compute read latencies
-  std::cout << world_rank << ": Executing read from peers now." << std::endl;
+  std::cout << world_rank << ": Computing tolopogy information for the cluster..." << std::endl;
   num_nodes = world_size / local_size;
   driver.all_gather_read_from_bufs();
   driver.compute_peer_read_lat();
   MPI_Barrier(MPI_COMM_WORLD);
 
-  //--- Gather results across all nodes on rank 0
+  // --- Gather results across all nodes on rank 0
   gather_results_to_rank_0(MPI_COMM_WORLD);
   MPI_Barrier(MPI_COMM_WORLD);
 
   if (world_rank == 0) {
     std::cout << "-----------------------------------" << std::endl;
-    std::cout << "Latency measurements across nodes (microseconds): " << std::endl;
-    std::cout << std::setprecision(2) << std::fixed;
-    for (int i = 0; i < num_nodes; i ++) {
-      for (int j = 0; j < num_nodes; j ++) {
-        std::cout << peer_read_latency[num_nodes * i + j] << "\t";
-      }
-      std::cout << std::endl;
-    } 
+    std::cout << "RDMA Read latency measurements (microseconds): " << std::endl;
+    print_results();
   }
 
   MPI_Barrier(MPI_COMM_WORLD);
 
-  std::cout << world_rank << ": calling MPI finalize now " << std::endl;
   MPI_Finalize();
   return 0;
 }
