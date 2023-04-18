@@ -37,13 +37,13 @@ const int qp_idx = 0;
 // TODO: Add doc strings
 
 std::string output_dir;
-// std::ofstream log, result;
+std::ofstream log, result;
 
 int world_rank, world_size, local_rank, local_size, num_nodes;
 
 void exit_and_close_files(int ret) {
   // log.close();
-  // result.close();
+  result.close();
   exit(ret);
 }
 
@@ -98,7 +98,7 @@ public:
       pair.read_status.completed = false;
     }
     // for (int gpu_id = 0; gpu_id < num_gpu; gpu_id ++) {
-      auto& pair = gpu_pairs[gpu_idx * world_size + world_rank];
+      auto& pair = gpu_pairs[world_rank];
       pair.ah_created = true;
       pair.read_status.enqueued = true;
       pair.read_status.completed = true;
@@ -122,9 +122,9 @@ public:
       ahAttr.grh.dgid = addresses[peer_idx].gid;
       addresses[peer_idx].ah = ibv_create_ah(
         rdmaResources.ctx_.protectionDomain, &ahAttr);
-      gpu_pairs[(efa_idx * num_gpu_per_efa) * world_size + peer_idx].ah_created =
+      gpu_pairs[peer_idx].ah_created =
         addresses[peer_idx].ah != nullptr;
-      gpu_pairs[(efa_idx * num_gpu_per_efa + 1) * world_size + peer_idx].ah_created =
+      gpu_pairs[peer_idx].ah_created =
         addresses[peer_idx].ah != nullptr;
     }
   }
@@ -137,10 +137,11 @@ public:
   std::vector<RDMAReadInfo> rdma_read_info;
   void all_gather_read_from_bufs() {
     rdma_read_info.resize(world_size);
-    rdma_read_info[gpu_idx].base_addr = rdmaResources.read_from_buf[qp_idx];
-    rdma_read_info[gpu_idx].rkey = rdmaResources.mr_read_from[qp_idx]->rkey;
+    RDMAReadInfo local_rdma_read_info;
+    local_rdma_read_info.base_addr = rdmaResources.read_from_buf[qp_idx];
+    local_rdma_read_info.rkey = rdmaResources.mr_read_from[qp_idx]->rkey;
     MPI_Allgather(
-        rdma_read_info.data(), sizeof(RDMAReadInfo), MPI_BYTE,
+        &local_rdma_read_info, sizeof(RDMAReadInfo), MPI_BYTE,
         rdma_read_info.data(), sizeof(RDMAReadInfo), MPI_BYTE, MPI_COMM_WORLD);
   }
 
@@ -259,23 +260,23 @@ void crash_process(int time_in_seconds) {
 }
 
 void print_results() {
-  std::cout << std::setprecision(2) << std::fixed;
+  result << std::setprecision(2) << std::fixed;
   for (int i = 0; i < num_nodes; i++) {
-    std::cout << " \t" << i;
+    result << "\t\t" << i;
   }
-  std::cout << std::endl;
+  result << std::endl;
   for (int i = 0; i < num_nodes; i ++) {
-    std::cout << i << "\t";
+    result << i << "\t";
     for (int j = 0; j < num_nodes; j ++) {
-      std::cout << peer_read_latency[num_nodes * i + j] << "\t";
+      result << peer_read_latency[num_nodes * i + j] << "\t";
     }
-    std::cout << std::endl;
+    result << std::endl;
   } 
 }
 
 int main(int argc, char** argv) {
-  // --- Set a background thread to crash process in 30 seconds to prevent hang
-  std::thread crash_thread(crash_process, 12);
+  // --- Set a background thread to crash process in 120 seconds to prevent hang
+  std::thread crash_thread(crash_process, 120);
   crash_thread.detach();
 
   //--- Init MPI
@@ -326,8 +327,14 @@ int main(int argc, char** argv) {
   MPI_Barrier(MPI_COMM_WORLD);
 
   if (world_rank == 0) {
-    std::cout << "-----------------------------------" << std::endl;
-    std::cout << "RDMA Read latency measurements (microseconds): " << std::endl;
+    std::string result_file_name = output_dir + "topology_" + std::to_string(num_nodes) + ".result";
+    result.open(result_file_name);
+    if (!result) {
+      std::cout << "Failed to open " << result_file_name << std::endl;
+      exit_and_close_files(3);
+    }
+    result << "-----------------------------------" << std::endl;
+    result << "RDMA Read latency measurements (microseconds): " << std::endl;
     print_results();
   }
 
