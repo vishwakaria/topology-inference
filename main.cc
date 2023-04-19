@@ -274,6 +274,24 @@ void print_results() {
   } 
 }
 
+void printVector(std::vector<double>& v) {
+  for (int i=0; i<v.size(); i++) {
+    std::cout << v[i] << " ";
+  }
+  std::cout << std::endl;
+}
+
+void sequential_compute_read_latencies(FederatedRdmaClient& driver) {
+  for (int i = 0; i < num_nodes; i ++) {
+    if (world_rank == i) {
+      std::cout << "Enqueing reads for rank " << i << std::endl;
+      driver.compute_peer_read_lat();
+      printVector(peer_read_latency);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+  }
+}
+
 int main(int argc, char** argv) {
   // --- Set a background thread to crash process in 120 seconds to prevent hang
   std::thread crash_thread(crash_process, 120);
@@ -319,15 +337,16 @@ int main(int argc, char** argv) {
   std::cout << world_rank << ": Computing tolopogy information for the cluster..." << std::endl;
   num_nodes = world_size / local_size;
   driver.all_gather_read_from_bufs();
-  driver.compute_peer_read_lat();
-  MPI_Barrier(MPI_COMM_WORLD);
+  // driver.compute_peer_read_lat();
+  // MPI_Barrier(MPI_COMM_WORLD);
+  sequential_compute_read_latencies(driver);
 
   // --- Gather results across all nodes on rank 0
   gather_results_to_rank_0(MPI_COMM_WORLD);
   MPI_Barrier(MPI_COMM_WORLD);
 
-  if (world_rank == 0) {
-    std::string result_file_name = output_dir + "topology_" + std::to_string(num_nodes) + ".result";
+  // if (world_rank == 0) {
+    std::string result_file_name = output_dir + "topology_" + std::to_string(num_nodes) + "_" + std::to_string(world_rank) + ".result";
     result.open(result_file_name);
     if (!result) {
       std::cout << "Failed to open " << result_file_name << std::endl;
@@ -336,7 +355,7 @@ int main(int argc, char** argv) {
     result << "-----------------------------------" << std::endl;
     result << "RDMA Read latency measurements (microseconds): " << std::endl;
     print_results();
-  }
+  // }
 
   MPI_Barrier(MPI_COMM_WORLD);
 
