@@ -25,10 +25,10 @@
 #include "rdma_resources.h"
 #include "instance_id.h"
 
-const size_t packet_size = 8*1024;
+const size_t packet_size = 8;
 const int num_gpu = 8;
 const int num_gpu_per_efa = 2;
-const int num_iter = 10000;
+const int num_iter = 1000;
 const int warmup_iter = 100;
 const int efa_idx = 0;
 const int gpu_idx = 0;
@@ -261,16 +261,13 @@ void crash_process(int time_in_seconds) {
 
 void print_results() {
   result << std::setprecision(2) << std::fixed;
-  for (int i = 0; i < num_nodes; i++) {
-    result << "\t\t" << i;
-  }
-  result << std::endl;
   for (int i = 0; i < num_nodes; i ++) {
-    result << i << "\t";
     for (int j = 0; j < num_nodes; j ++) {
       result << peer_read_latency[num_nodes * i + j] << "\t";
     }
-    result << std::endl;
+    if (i != num_nodes - 1) {
+      result << std::endl;
+    }
   } 
 }
 
@@ -286,16 +283,16 @@ void sequential_compute_read_latencies(FederatedRdmaClient& driver) {
     if (world_rank == i) {
       std::cout << "Enqueing reads for rank " << i << std::endl;
       driver.compute_peer_read_lat();
-      printVector(peer_read_latency);
+      // printVector(peer_read_latency);
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }
 }
 
 int main(int argc, char** argv) {
-  // --- Set a background thread to crash process in 120 seconds to prevent hang
-  std::thread crash_thread(crash_process, 120);
-  crash_thread.detach();
+  // --- Set a background thread to crash process in 20 minutes to prevent hang
+  // std::thread crash_thread(crash_process, 20*60);
+  // crash_thread.detach();
 
   //--- Init MPI
   setenv("FI_EFA_FORK_SAFE", "1", 1);
@@ -305,7 +302,7 @@ int main(int argc, char** argv) {
   MPICHECK(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
   local_size = atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_SIZE"));
   local_rank = atoi(std::getenv("OMPI_COMM_WORLD_LOCAL_RANK"));
-  std::cout << world_rank << ": pid = " << getpid() << std::endl;
+  std::cout << world_size << ": " << world_rank << ": pid = " << getpid() << std::endl;
   MPI_Barrier(MPI_COMM_WORLD);
 
   // revisit this
@@ -345,17 +342,15 @@ int main(int argc, char** argv) {
   gather_results_to_rank_0(MPI_COMM_WORLD);
   MPI_Barrier(MPI_COMM_WORLD);
 
-  // if (world_rank == 0) {
-    std::string result_file_name = output_dir + "topology_" + std::to_string(num_nodes) + "_" + std::to_string(world_rank) + ".result";
+  if (world_rank == 0) {
+    std::string result_file_name = output_dir + "latency_measurements.result";
     result.open(result_file_name);
     if (!result) {
       std::cout << "Failed to open " << result_file_name << std::endl;
       exit_and_close_files(3);
     }
-    result << "-----------------------------------" << std::endl;
-    result << "RDMA Read latency measurements (microseconds): " << std::endl;
     print_results();
-  // }
+  }
 
   MPI_Barrier(MPI_COMM_WORLD);
 

@@ -15,6 +15,6 @@ find_program(MPIRUN /opt/amazon/openmpi/bin/mpirun)
 include_directories(${MPI_INCLUDE_PATH})
 include_directories(${CUDA_INCLUDE_DIRS})
 
-add_executable(main main.cc rdma_context.cc rdma_resources.cc)
+add_executable(latency_calculator latency_calculator.cc rdma_context.cc rdma_resources.cc)
 
-target_link_libraries(main PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)
+target_link_libraries(latency_calculator PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)
