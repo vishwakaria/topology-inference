@@ -117,14 +117,15 @@ public:
 
   void all_gather_read_from_bufs() {
     rdma_read_info.resize(world_size * num_gpu);
+    std::vector<FederatedRdmaClient::RDMAReadInfo> local_rdma_read_info(num_gpu);
     for (int gpu_idx = 0; gpu_idx < num_gpu; gpu_idx ++) {
       int efa_idx = gpu_idx / num_gpu_per_efa;
       int qp_idx = gpu_idx % num_gpu_per_efa;
-      rdma_read_info[gpu_idx].base_addr = rdmaResources[efa_idx].read_from_buf[qp_idx];
-      rdma_read_info[gpu_idx].rkey = rdmaResources[efa_idx].mr_read_from[qp_idx]->rkey;
+      local_rdma_read_info[gpu_idx].base_addr = rdmaResources[efa_idx].read_from_buf[qp_idx];
+      local_rdma_read_info[gpu_idx].rkey = rdmaResources[efa_idx].mr_read_from[qp_idx]->rkey;
     }
     MPI_Allgather(
-        rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE,
+        local_rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE,
         rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE, MPI_COMM_WORLD);
   }
 
@@ -203,7 +204,6 @@ public:
 
   double avg_without_outliers(std::vector<double>& latencies) {
     std::sort(latencies.begin(), latencies.end());
-    // int p90_size = latencies.size() * 0.9;
     int p90_size = latencies.size();
     return std::reduce(latencies.begin(), latencies.begin() + p90_size, 0.0) / p90_size;
   }
@@ -315,6 +315,28 @@ void compute_topology(FederatedRdmaClient& driver) {
   }
 }
 
+void compute_topology_O_1(FederatedRdmaClient& driver) {
+  PairwiseLatency lat_pair;
+
+  init_topology_mapping();
+  int next_in_ring = (world_rank + 1) % num_nodes;
+  if (world_rank % 2 == 0) {
+    lat_pair = driver.measure_read_latency(next_in_ring, 0);
+  } else {
+    lat_pair = driver.measure_read_latency(next_in_ring, 2);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (world_rank != 0) {
+    MPI_Send(&lat_pair, sizeof(lat_pair), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+  } else {
+    assign_topology_bucket(lat_pair);
+    for (int i = 1; i < num_nodes; i++) {
+      MPI_Recv(&lat_pair, sizeof(lat_pair), MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+    printBuckets();
+  }
+}
+
 void gather_instance_id_to_rank_0() {
   // Instance id is 19 characters long
   std::string instance_id = get_instance_id();
@@ -361,6 +383,7 @@ int main(int argc, char** argv) {
   driver.all_gather_read_from_bufs();
   auto begin = std::chrono::steady_clock::now();
   compute_topology(driver);
+  // compute_topology_O_1(driver);
   auto end = std::chrono::steady_clock::now();
 
   double timeMilliSeconds = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
