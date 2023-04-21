@@ -20,8 +20,6 @@
 
 #include <chrono>
 
-int gpu_idx = 0;
-
 void RdmaResources::init(int efa_idx, int num_qp, size_t send_buff_size, size_t recv_buff_size,
   int read_from_buff_size, int read_into_buff_size) {
   send_buff_size_ = send_buff_size;

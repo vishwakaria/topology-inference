@@ -18,3 +18,7 @@ include_directories(${CUDA_INCLUDE_DIRS})
 add_executable(latency_calculator latency_calculator.cc rdma_context.cc rdma_resources.cc)
 
 target_link_libraries(latency_calculator PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)
+
+add_executable(ring_latency_calculator ring_latency_calculator.cc rdma_context.cc rdma_resources.cc)
+
+target_link_libraries(ring_latency_calculator PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)

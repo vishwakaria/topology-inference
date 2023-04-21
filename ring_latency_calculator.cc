@@ -151,7 +151,7 @@ public:
     return ret == 0;
   }
 
-  std::chrono::steady_clock::time_point poll_peer_read_completion(int gpu_idx) {
+  std::chrono::steady_clock::time_point poll_read_completion(int gpu_idx) {
     int efa_idx = gpu_idx / num_gpu_per_efa;
     int qp_idx = gpu_idx % num_gpu_per_efa;
     int node_id = world_rank / local_size;
@@ -178,13 +178,9 @@ public:
 
   PairwiseLatency measure_read_latency(int peer_idx, int gpu_idx) {
     int node_id = world_rank / local_size;
-    // if (node_id == 5) {
-    //   std::cout << "Node: " << node_id << " Peer: " << peer_idx << std::endl;
-    // }
     size_t offset;
     std::vector<double> all_read_latencies;
     for (int iter = 0; iter < defaults::num_iter; iter ++) {
-      // if (node_id == 5) std::cout << "Iter: " << iter << std::endl;
       auto& pair = gpu_pairs[world_size * gpu_idx + peer_idx];
       if (!pair.ah_created) {
         std::cout << "AH not created yet" << std::endl;
@@ -193,15 +189,14 @@ public:
       offset = peer_idx * defaults::packet_size;
       auto begin = std::chrono::steady_clock::now();
       pair.read_status.enqueued = post_read_request_to_efa(peer_idx, gpu_idx, offset);
-      auto end = poll_peer_read_completion(gpu_idx);
+      auto end = poll_read_completion(gpu_idx);
       double timeMicroSeconds = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
-      // if (node_id == 5) std::cout << "Time: " << timeMicroSeconds << std::endl;
       if (iter >= defaults::warmup_iter) {
         all_read_latencies.push_back(timeMicroSeconds);
       }
     }
     double avg =  avg_without_outliers(all_read_latencies);
-    std::cout << world_rank << ": Avg: "  << avg << std::endl;
+    // std::cout << world_rank << ": Avg: "  << avg << std::endl;
     PairwiseLatency pair = {node_id, peer_idx, avg};
     return pair;
   }
