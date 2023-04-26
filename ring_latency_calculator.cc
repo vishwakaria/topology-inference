@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <mpi.h>
 #include <numeric>
@@ -26,6 +27,7 @@ int num_gpu = 8, num_gpu_per_efa = 2;
 // const int efa_idx = 0, qp_idx = 0;
 // const int gpu_idx = 0;
 int world_rank, world_size, local_rank, local_size, num_nodes;
+std::string output_dir;
 
 struct WCStatus {
   ibv_wc_status status;
@@ -148,7 +150,6 @@ public:
       federatedAddresses[peer_idx].efaAddress[efa_idx].qpn[qp_idx],
       federatedAddresses[peer_idx].efaAddress[efa_idx].qkey);
     int ret = ibv_wr_complete(qpEx);
-    // if (node_id == 5) std::cout << "Done enqueue " << std::endl;
     return ret == 0;
   }
 
@@ -197,7 +198,7 @@ public:
       }
     }
     double avg =  avg_without_outliers(all_read_latencies);
-    // std::cout << world_rank << ": Avg: "  << avg << std::endl;
+    std::cout << world_rank << ": Avg: "  << avg << std::endl;
     PairwiseLatency pair = {node_id, peer_idx, avg};
     return pair;
   }
@@ -266,89 +267,50 @@ void printBuckets() {
 }
 
 void compute_topology(FederatedRdmaClient& driver) {
-  init_topology_mapping();
-  for (int i = 0; i < num_nodes; i += 2) {
-    PairwiseLatency lat_pair;
-    int next_in_ring = (i + 1) % num_nodes;
-    int prev_in_ring = (i + num_nodes - 1) % num_nodes;
-    
-    // Node i - 1 reads from node i on EFA 0, GPU 0
-    // Node i reads from node i + 1 on EFA 1, GPU 2
-    if (world_rank == prev_in_ring) {
-      // std::cout << world_rank << ": Compusting topology for node " << prev_in_ring << " and " << i << std::endl;
-      lat_pair = driver.measure_read_latency(i, 2);
-      if (world_rank != 0) {
-        // std::cout << world_rank << ": Sending to 0" << std::endl;
-        MPI_Send(&lat_pair, sizeof(lat_pair), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
-      }
-    } else if (world_rank == i) {
-      // std::cout << world_rank << ": Computing topology for node " << i << " and " << next_in_ring << std::endl;
-      lat_pair = driver.measure_read_latency(next_in_ring, 0);
-      if (world_rank != 0) {
-        // std::cout << world_rank << ": Sending to 0" << std::endl;
-        MPI_Send(&lat_pair, sizeof(lat_pair), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
-      }
-    } 
-    
-    if (world_rank == 0) {
-      std::vector<int> recv_ranks;
-      PairwiseLatency recv_pair;
-
-      // Process previous in ring before next in ring, 
-      // so we always have one assigned node in the pair (except for first pair processed)
-      if (prev_in_ring != 0) recv_ranks.push_back(prev_in_ring);
-      if (i != 0) recv_ranks.push_back(i);
-
-      for (int j = 0; j < recv_ranks.size(); j ++) {
-        // std::cout << "rank 0 receiving from " << recv_ranks[j] << std::endl;
-        MPI_Recv(&recv_pair, sizeof(recv_pair), MPI_BYTE, recv_ranks[j], 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        assign_topology_bucket(recv_pair);
-        // printBuckets();
-      }
-      // Rank 0 does not send to itself, so process self if remaining.
-      if (recv_ranks.size() != 2) {
-        assign_topology_bucket(lat_pair);
-        // printBuckets();
-      }
-    } 
-    MPI_Barrier(MPI_COMM_WORLD);
-  }
-}
-
-void compute_topology_O_1(FederatedRdmaClient& driver) {
   PairwiseLatency lat_pair;
-
   init_topology_mapping();
+
+  // Each node reads from the next in ring
+  // All even nodes read from the next in ring on EFA 0, GPU 0
+  // All odd nodes  read from the next in ring on EFA 1, GPU 2ß
   int next_in_ring = (world_rank + 1) % num_nodes;
   if (world_rank % 2 == 0) {
     lat_pair = driver.measure_read_latency(next_in_ring, 0);
   } else {
     lat_pair = driver.measure_read_latency(next_in_ring, 2);
   }
-  MPI_Barrier(MPI_COMM_WORLD);
+
+  // Node 0 receives latency pairs from all other nodes and assigns buckets
   if (world_rank != 0) {
     MPI_Send(&lat_pair, sizeof(lat_pair), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
   } else {
     assign_topology_bucket(lat_pair);
     for (int i = 1; i < num_nodes; i++) {
       MPI_Recv(&lat_pair, sizeof(lat_pair), MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      assign_topology_bucket(lat_pair);
     }
-    printBuckets();
   }
 }
 
-void gather_instance_id_to_rank_0() {
-  // Instance id is 19 characters long
-  std::string instance_id = get_instance_id();
-  instance_id += "\0                             "; // 30 spaces padding to avoid illegal mem access
-  char instance_ids[world_size][30];
-  MPI_Gather(instance_id.c_str(), 30, MPI_BYTE, instance_ids, 30, MPI_BYTE, 0, MPI_COMM_WORLD);
-  if (world_rank == 0) {
-    std::cout << "Instance id mapping: " << std::endl;
-    for (int i = 0; i < world_size; i++) {
-      std::cout << "Node " << i << " - " << instance_ids[i] << std::endl;
-    }
+void broadcast_topology_mapping() {
+  topology_mapping.resize(num_nodes);
+  MPI_Bcast(topology_mapping.data(), topology_mapping.size(), MPI_INT, 0, MPI_COMM_WORLD);
+}
+
+void write_topology_to_file(std::string output_dir) {
+  broadcast_topology_mapping();
+  
+  std::ofstream outfile;
+  std::string filename = output_dir + "cluster_topology.txt";
+  std::cout << "Writing topology to " << filename << std::endl;
+  outfile.open(filename);
+  if (!outfile) {
+    std::cout << "Error: Could not open result file " << filename << std::endl;
   }
+  for (int i = 0; i < topology_mapping.size(); i ++) {
+    outfile << "algo-" << std::to_string(i+1) << " spine" << std::to_string(topology_mapping[i] + 1) << std::endl;
+  }
+  outfile.close();
 }
 
 int main(int argc, char** argv) {
@@ -364,8 +326,12 @@ int main(int argc, char** argv) {
   std::cout << world_rank << ": " << num_nodes << ": pid = " << getpid() << std::endl;
   MPI_Barrier(MPI_COMM_WORLD);
 
-  gather_instance_id_to_rank_0();
-  
+  if (argc > 1) {
+    output_dir = argv[1];
+    output_dir += "/";
+    std::cout << "output_dir = " << output_dir << std::endl;
+  }
+    
   //--- Booststrap EFA devices
   std::cout << world_rank << ": Loading EFA devices..." << std::endl;
   FederatedRdmaClient driver;
@@ -383,17 +349,17 @@ int main(int argc, char** argv) {
   driver.all_gather_read_from_bufs();
   auto begin = std::chrono::steady_clock::now();
   compute_topology(driver);
-  // compute_topology_O_1(driver);
   auto end = std::chrono::steady_clock::now();
-
   double timeMilliSeconds = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
   if (world_rank == 0) {
     printBuckets();
     std::cout <<  "Compute time: " << timeMilliSeconds << " ms" << std::endl;
   }
+  // Write topology mapping to output directory passed in args
+  write_topology_to_file(output_dir);
+
   MPI_Barrier(MPI_COMM_WORLD);
 
-  // std::cout << "Done" << std::endl;
   MPI_Finalize();
   return 0;
 }
