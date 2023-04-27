@@ -1,0 +1,4 @@
+ssh compute-st-worker-1 \
+"mpirun --hostfile /fsx/viskaria/topology-inference/scripts/hostlist \
+-np 8 --oversubscribe --allow-run-as-root /fsx/viskaria/topology-inference/build/main \
+/fsx/viskaria/topology-inference"
