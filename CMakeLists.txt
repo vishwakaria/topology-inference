@@ -15,10 +15,12 @@ find_program(MPIRUN /opt/amazon/openmpi/bin/mpirun)
 include_directories(${MPI_INCLUDE_PATH})
 include_directories(${CUDA_INCLUDE_DIRS})
 
-add_executable(latency_calculator latency_calculator.cc rdma_context.cc rdma_resources.cc)
+set(SRC
+  src/multispine_latency_calculator.cc
+  src/rdma_context.cc
+  src/rdma_resources.cc
+)
 
-target_link_libraries(latency_calculator PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)
+add_executable(multispine_latency_calculator ${SRC})
 
-add_executable(ring_latency_calculator ring_latency_calculator.cc rdma_context.cc rdma_resources.cc)
-
-target_link_libraries(ring_latency_calculator PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)
+target_link_libraries(multispine_latency_calculator PUBLIC ${MPI_LIBRARIES} ${CUDA_LIBRARIES} ibverbs efa pthread)
