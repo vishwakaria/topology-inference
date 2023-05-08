@@ -20,7 +20,7 @@ public:
   };
 
   struct FederatedAddress {
-    struct Address efaAddress[2];
+    struct Address efaAddress[4];
   };
 
   RdmaResources() = default;

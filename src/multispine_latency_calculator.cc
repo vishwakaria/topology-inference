@@ -7,6 +7,7 @@
 #include <numeric>
 #include <set>
 #include <stdlib.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -19,10 +20,10 @@ namespace defaults {
   const int num_iter = 1000;
   const int warmup_iter = 100;
   const int spine_latency_threshold_us = 60;
-  const int num_efa_needed = 2;
+  const int num_efa = 4;
+  const int num_gpu = 8, num_gpu_per_efa = 2;
 }
 
-int num_gpu = 8, num_gpu_per_efa = 2;
 int world_rank, world_size, local_rank, local_size, num_nodes;
 std::string output_dir;
 
@@ -52,9 +53,9 @@ public:
     int read_into_buf_size = world_size * defaults::packet_size;
 
     std::string bootstrap_error;
-    for (int efa_idx = 0; efa_idx < defaults::num_efa_needed; efa_idx ++) {
+    for (int efa_idx = 0; efa_idx < defaults::num_efa; efa_idx ++) {
       try {
-        rdmaResources[efa_idx].init(efa_idx, num_gpu_per_efa, send_buf_size, recv_buf_size, read_from_buf_size, read_into_buf_size);
+        rdmaResources[efa_idx].init(efa_idx, defaults::num_gpu_per_efa, send_buf_size, recv_buf_size, read_from_buf_size, read_into_buf_size);
       } catch (EFAException& e) {
         bootstrap_error += "Node " + std::to_string(world_rank) + " EFA " + std::to_string(efa_idx)
       + " failed to bootstrap with false assertion: " + e.what() + "\n";
@@ -65,13 +66,13 @@ public:
   }
 
   void init_records() {
-    gpu_pairs.resize(num_gpu * world_size);
+    gpu_pairs.resize(defaults::num_gpu * world_size);
     for (auto& pair : gpu_pairs) {
       pair.ah_created = false;
       pair.read_status.enqueued = false;
       pair.read_status.completed = false;
     }
-    for (int gpu_id = 0; gpu_id < num_gpu; gpu_id ++) {
+    for (int gpu_id = 0; gpu_id < defaults::num_gpu; gpu_id ++) {
       auto& pair = gpu_pairs[gpu_id * world_size + world_rank];
       pair.ah_created = true;
       pair.read_status.enqueued = true;
@@ -83,7 +84,7 @@ public:
 
   void create_address_handles() {
     RdmaResources::FederatedAddress federatedAddress;
-    for (int efa_idx = 0; efa_idx < defaults::num_efa_needed; efa_idx++) {
+    for (int efa_idx = 0; efa_idx < defaults::num_efa; efa_idx++) {
       federatedAddress.efaAddress[efa_idx] = rdmaResources[efa_idx].addr;
     }
     federatedAddresses.resize(world_size);
@@ -93,7 +94,7 @@ public:
 
     for (int peer_idx = 0; peer_idx < world_size; peer_idx ++) {
       if (peer_idx == world_rank) continue;
-      for (int efa_idx = 0; efa_idx < defaults::num_efa_needed; efa_idx ++) {
+      for (int efa_idx = 0; efa_idx < defaults::num_efa; efa_idx ++) {
         ibv_ah_attr ahAttr;
         memset(&ahAttr, 0, sizeof(ahAttr));
         ahAttr.is_global = 1;
@@ -101,9 +102,9 @@ public:
         ahAttr.grh.dgid = federatedAddresses[peer_idx].efaAddress[efa_idx].gid;
         federatedAddresses[peer_idx].efaAddress[efa_idx].ah = ibv_create_ah(
           rdmaResources[efa_idx].ctx_.protectionDomain, &ahAttr);
-        gpu_pairs[(efa_idx * num_gpu_per_efa) * world_size + peer_idx].ah_created =
+        gpu_pairs[(efa_idx * defaults::num_gpu_per_efa) * world_size + peer_idx].ah_created =
           federatedAddresses[peer_idx].efaAddress[efa_idx].ah != nullptr;
-        gpu_pairs[(efa_idx * num_gpu_per_efa + 1) * world_size + peer_idx].ah_created =
+        gpu_pairs[(efa_idx * defaults::num_gpu_per_efa + 1) * world_size + peer_idx].ah_created =
           federatedAddresses[peer_idx].efaAddress[efa_idx].ah != nullptr;
       }
     }
@@ -111,23 +112,23 @@ public:
   }
 
   void all_gather_read_from_bufs() {
-    rdma_read_info.resize(world_size * num_gpu);
-    std::vector<FederatedRdmaClient::RDMAReadInfo> local_rdma_read_info(num_gpu);
-    for (int gpu_idx = 0; gpu_idx < num_gpu; gpu_idx ++) {
-      int efa_idx = gpu_idx / num_gpu_per_efa;
-      int qp_idx = gpu_idx % num_gpu_per_efa;
+    rdma_read_info.resize(world_size * defaults::num_gpu);
+    std::vector<FederatedRdmaClient::RDMAReadInfo> local_rdma_read_info(defaults::num_gpu);
+    for (int gpu_idx = 0; gpu_idx < defaults::num_gpu; gpu_idx ++) {
+      int efa_idx = gpu_idx / defaults::num_gpu_per_efa;
+      int qp_idx = gpu_idx % defaults::num_gpu_per_efa;
       local_rdma_read_info[gpu_idx].base_addr = rdmaResources[efa_idx].read_from_buf[qp_idx];
       local_rdma_read_info[gpu_idx].rkey = rdmaResources[efa_idx].mr_read_from[qp_idx]->rkey;
     }
     MPI_Allgather(
-        local_rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE,
-        rdma_read_info.data(), sizeof(RDMAReadInfo) * num_gpu, MPI_BYTE, MPI_COMM_WORLD);
+        local_rdma_read_info.data(), sizeof(RDMAReadInfo) * defaults::num_gpu, MPI_BYTE,
+        rdma_read_info.data(), sizeof(RDMAReadInfo) * defaults::num_gpu, MPI_BYTE, MPI_COMM_WORLD);
     return;
   }
 
   bool post_read_request_to_efa(int peer_idx, int gpu_idx, size_t offset) {
-    int efa_idx = gpu_idx / num_gpu_per_efa;
-    int qp_idx = gpu_idx % num_gpu_per_efa;
+    int efa_idx = gpu_idx / defaults::num_gpu_per_efa;
+    int qp_idx = gpu_idx % defaults::num_gpu_per_efa;
     ibv_qp_ex *qpEx = rdmaResources[efa_idx].ctx_.queuePairEx[qp_idx];
     ibv_wr_start(qpEx);
     ibv_sge list;
@@ -135,8 +136,8 @@ public:
     list.length = defaults::packet_size;
     list.lkey = rdmaResources[efa_idx].mr_read_into[qp_idx]->lkey;
     qpEx->wr_id = (uint64_t)peer_idx;
-    ibv_wr_rdma_read(qpEx, rdma_read_info[peer_idx * num_gpu + gpu_idx].rkey,
-      (uint64_t)rdma_read_info[peer_idx * num_gpu + gpu_idx].base_addr + offset);
+    ibv_wr_rdma_read(qpEx, rdma_read_info[peer_idx * defaults::num_gpu + gpu_idx].rkey,
+      (uint64_t)rdma_read_info[peer_idx * defaults::num_gpu + gpu_idx].base_addr + offset);
     ibv_wr_set_sge_list(qpEx, 1, &list);
     ibv_wr_set_ud_addr(qpEx, federatedAddresses[peer_idx].efaAddress[efa_idx].ah,
       federatedAddresses[peer_idx].efaAddress[efa_idx].qpn[qp_idx],
@@ -146,8 +147,8 @@ public:
   }
 
   std::chrono::steady_clock::time_point poll_read_completion(int gpu_idx) {
-    int efa_idx = gpu_idx / num_gpu_per_efa;
-    int qp_idx = gpu_idx % num_gpu_per_efa;
+    int efa_idx = gpu_idx / defaults::num_gpu_per_efa;
+    int qp_idx = gpu_idx % defaults::num_gpu_per_efa;
     int read_count = 0, read_from;
     bool more_to_poll = true;
     while (more_to_poll) {
@@ -169,7 +170,8 @@ public:
     }
   }
 
-  double measure_read_latency(int peer_idx, int gpu_idx = 0) {
+  double measure_read_latency(int peer_idx, int efa_idx = 0) {
+    int gpu_idx = efa_idx * defaults::num_gpu_per_efa;
     int node_id = world_rank / local_size;
     size_t offset;
     std::vector<double> all_read_latencies;
@@ -190,6 +192,7 @@ public:
     }
     double avg =  avg_without_outliers(all_read_latencies);
     // std::cout << world_rank << ": Read latency from peer " << peer_idx << ": "  << avg << std::endl;
+    // return 100; // To simulate inter-spine latency for testing
     return avg;
   }
 
@@ -205,7 +208,7 @@ private:
     uint32_t rkey;
   };
 
-  RdmaResources rdmaResources[defaults::num_efa_needed];
+  RdmaResources rdmaResources[defaults::num_efa];
   std::vector<RdmaResources::FederatedAddress> federatedAddresses;
   const int completion_burst_size_ = 1024;
   std::vector<ibv_wc> send_work_completions_{completion_burst_size_};
@@ -219,7 +222,7 @@ public:
   TopologyCalculator() = default;
   ~TopologyCalculator() = default;
 
-  void compute_topology(FederatedRdmaClient& driver) {
+  void compute_topology_single_efa(FederatedRdmaClient& driver) {
     init_topology_mapping();
 
     for (int i = 0; i < num_nodes; i ++) { 
@@ -229,6 +232,37 @@ public:
           if (is_same_spine(nodeInSpineJ, driver)) {
             assign_node_to_spine(j);
             break;
+          }
+        }
+        if (node_to_spine_mapping[i] == -1) { 
+          assign_node_to_spine(num_spines);
+        }
+      }
+      broadcast_topology_mapping(i); // also acts as a barrier
+      MPI_Barrier(MPI_COMM_WORLD);
+    }
+    return;
+  }
+
+  void compute_topology_multi_efa(FederatedRdmaClient& driver) {
+    init_topology_mapping();
+
+    for (int i = 1; i < num_nodes; i ++) { 
+      if (i == world_rank && node_to_spine_mapping[i] == -1) {
+        // std::cout << "num_spines for i = " << i << " is " << num_spines << std::endl; 
+        std::vector<std::thread> threads(defaults::num_efa);
+        std::vector<int> results(defaults::num_efa, 0);
+        for (int j = 0; j < num_spines; j += defaults::num_efa) {
+          for (int k = 0; k < defaults::num_efa && (k + j) < num_spines; k++) {
+            int nodeInSpine = find_node_in_spine(k+j);
+            threads[k] = std::thread(&TopologyCalculator::is_same_spine_threadfn, 
+                              this, nodeInSpine, k, std::ref(driver), std::ref(results[k]));
+          }
+          for (int k = 0; k < defaults::num_efa && (k + j) < num_spines; k++) {
+            threads[k].join();
+            if (results[k]) {
+              assign_node_to_spine(k+j);
+            }
           }
         }
         if (node_to_spine_mapping[i] == -1) { 
@@ -285,6 +319,13 @@ private:
     return (lat > defaults::spine_latency_threshold_us) ? false : true;
   }
 
+  void is_same_spine_threadfn(int peer_idx, int efa_idx, FederatedRdmaClient& driver, int& result) {
+    double lat = driver.measure_read_latency(peer_idx, efa_idx);
+    // std::cout << world_rank << ": lat = " << lat << "for peer " << peer_idx << " in efa " << efa_idx << std::endl;
+    result = (lat > defaults::spine_latency_threshold_us) ? 0 : 1;
+    // std::cout << world_rank << ": is same spine as peer " << peer_idx << ": " << result << std::endl;
+  }
+
   int find_node_in_spine(int spine_idx) {
     for (int i = 0; i < node_to_spine_mapping.size(); i ++) {
       if (node_to_spine_mapping[i] == spine_idx) {
@@ -296,9 +337,11 @@ private:
   }
 
   void assign_node_to_spine(int spine_idx) {
+    // std::cout << world_rank << ": Assigning node to spine " << spine_idx << std::endl;
     node_to_spine_mapping[world_rank] = spine_idx;
     if (spine_idx == num_spines) {
       num_spines ++;
+      // std::cout << world_rank << ": num_spines = " << num_spines << std::endl;
     }
     return;
   }
@@ -348,7 +391,8 @@ int main(int argc, char** argv) {
   driver.all_gather_read_from_bufs();
   
   auto begin = std::chrono::steady_clock::now();
-  topology_calculator.compute_topology(driver);
+  // topology_calculator.compute_topology_single_efa(driver);
+  topology_calculator.compute_topology_multi_efa(driver);
   auto end = std::chrono::steady_clock::now();
   double time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
   std::cout <<  "Compute time: " << time_ms << " ms" << std::endl;
