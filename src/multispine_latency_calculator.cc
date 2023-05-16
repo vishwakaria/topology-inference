@@ -26,6 +26,7 @@ namespace defaults {
 
 int world_rank, world_size, local_rank, local_size, num_nodes;
 std::string output_dir;
+char hostname[1024];
 
 struct WCStatus {
   ibv_wc_status status;
@@ -276,8 +277,17 @@ public:
   }
 
   void write_topology_to_file() {
+    char hostnames[world_size][1024];
+    MPI_Allgather(hostname, 1024, MPI_BYTE, hostnames, 1024, MPI_BYTE, MPI_COMM_WORLD);
+    if (world_rank == 0) {
+      std::cout << "Hostname mapping: " << std::endl;
+      for (int i = 0; i < world_size; i++) {
+        std::cout << "Node " << i << " - " << hostnames[i] << std::endl; 
+      }
+    }
+
     std::ofstream outfile;
-    std::string filename = output_dir + "node_to_spine.txt";
+    std::string filename = output_dir + "node_to_spine" + std::to_string(world_rank) + ".txt";
     std::cout << "Writing topology to " << filename << std::endl;
     outfile.open(filename);
     if (!outfile) {
@@ -286,7 +296,7 @@ public:
     }
   
     for (uint32_t i = 0; i < num_nodes; i ++) {
-      outfile << "algo-" << std::to_string(i+1) << " spine" << std::to_string(node_to_spine_mapping[i] + 1) << std::endl;
+      outfile << hostnames[i] << " spine" << std::to_string(node_to_spine_mapping[i] + 1) << std::endl;
     }
     outfile.close();
     return;
@@ -358,8 +368,9 @@ int main(int argc, char** argv) {
   //--- Init MPI
   setenv("FI_EFA_FORK_SAFE", "1", 1);
   TopologyCalculator topology_calculator {};
+  gethostname(hostname, 1024);
 
-  std::cout << "Initializing MPI..." << std::endl;
+  std::cout << "Initializing MPI... on host" << hostname << std::endl;
   MPI_Init(&argc, &argv);
   MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
   MPICHECK(MPI_Comm_size(MPI_COMM_WORLD, &world_size));

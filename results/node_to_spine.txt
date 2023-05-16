@@ -1,8 +1,1 @@
 algo-1 spine1
-algo-2 spine1
-algo-3 spine2
-algo-4 spine2
-algo-5 spine1
-algo-6 spine1
-algo-7 spine1
-algo-8 spine1
