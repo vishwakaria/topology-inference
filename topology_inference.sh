@@ -11,3 +11,9 @@ fi
 
 # Broadcast results to all nodes
 echo "Done. Topology information can be found in $1/topology_mapping.txt"
+
+ssh compute-31 \
+"mpirun --hostfile /fsx/users/viskaria/topology-inference/scripts/hostlist -np 4 \
+--oversubscribe --allow-run-as-root \
+/fsx/users/viskaria/topology-inference/build/multispine_latency_calculator \
+/fsx/users/viskaria/topology-inference/results"

@@ -200,7 +200,12 @@ public:
   double avg_without_outliers(std::vector<double>& latencies) {
     std::sort(latencies.begin(), latencies.end());
     int p90_size = latencies.size() *  0.9;
-    return std::reduce(latencies.begin(), latencies.begin() + p90_size, 0.0) / p90_size;
+    // return std::reduce(latencies.begin(), latencies.begin() + p90_size, 0.0) / p90_size;
+    double sum = 0.0;
+    for (auto it = latencies.begin(); it != latencies.begin() + p90_size; ++it) {
+        sum += *it;
+    }
+    return sum / p90_size;
   }
 
 private:
@@ -287,7 +292,7 @@ public:
     }
 
     std::ofstream outfile;
-    std::string filename = output_dir + "node_to_spine" + std::to_string(world_rank) + ".txt";
+    std::string filename = output_dir + "node_to_spine.txt";
     std::cout << "Writing topology to " << filename << std::endl;
     outfile.open(filename);
     if (!outfile) {
